@@ -15,7 +15,8 @@
     "peerjs": "^1.5.4",
     "@google/genai": "*",
     "clsx": "^2.1.1",
-    "tailwind-merge": "^2.5.4"
+    "tailwind-merge": "^2.5.4",
+    "@supabase/supabase-js": "^2.39.0"
   },
   "devDependencies": {
     "@types/react": "^18.3.3",

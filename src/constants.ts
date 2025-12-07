@@ -14,14 +14,6 @@ export const STRANGER_DISCONNECTED_MSG: Message = {
   timestamp: Date.now(),
 };
 
-// Reduced slots to increase collision probability
-export const WAITING_SLOTS = 15; 
-export const SLOT_PREFIX = 'anon-chat-lobby-v3-slot-';
-
-// Timings for the Hunter-Gatherer Protocol
-export const HUNT_TIMEOUT_MS = 1500; // How long to wait for a connection when hunting a specific slot
-export const HOST_DURATION_MS = 10000; // How long to wait in a room before giving up and hunting again
-
 // Massive list of free STUN servers to punch through Mobile NATs
 export const ICE_SERVERS = [
   { urls: 'stun:stun.l.google.com:19302' },

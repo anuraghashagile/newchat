@@ -1,0 +1,14 @@
+import { createClient } from '@supabase/supabase-js';
+
+// Credentials injected for instant deployment
+const supabaseUrl = (import.meta as any).env.VITE_SUPABASE_URL || "https://tazqdcrgehbisqbitzzr.supabase.co";
+const supabaseAnonKey = (import.meta as any).env.VITE_SUPABASE_ANON_KEY || "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InRhenFkY3JnZWhiaXNxYml0enpyIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjUxMDA4MjksImV4cCI6MjA4MDY3NjgyOX0.F9swmB8AmsLBf7JF4r2rAqOJzrKH5DuQX13D6cRByy0";
+
+if (!supabaseUrl || !supabaseAnonKey) {
+  console.warn("Supabase credentials missing! Chat will not work.");
+}
+
+export const supabase = createClient(
+  supabaseUrl,
+  supabaseAnonKey
+);

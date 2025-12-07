@@ -232,7 +232,7 @@ export default function App() {
   }
 
   // --- 2. Searching Screen ---
-  if (activeChat.status === ChatMode.SEARCHING || activeChat.status === ChatMode.PAIRING) {
+  if (activeChat.status === ChatMode.SEARCHING || activeChat.status === ChatMode.WAITING) {
     return (
       <div className="h-screen bg-slate-950 flex flex-col items-center justify-center p-6 text-center">
         <div className="relative mb-8">
@@ -242,7 +242,7 @@ export default function App() {
         
         <h2 className="text-2xl font-bold text-white mb-2">Looking for someone...</h2>
         <p className="text-slate-500 max-w-xs mx-auto animate-pulse">
-          {activeChat.status === ChatMode.PAIRING 
+          {activeChat.status === ChatMode.WAITING 
             ? 'Waiting for partner to connect...' 
             : 'Searching for an available partner in the queue...'}
         </p>

@@ -1,7 +1,7 @@
 export enum ChatMode {
   IDLE = 'IDLE',
-  SEARCHING = 'SEARCHING', // Hunting (Client)
-  PAIRING = 'PAIRING',     // Hosting (Server)
+  SEARCHING = 'SEARCHING', // Looking for someone in DB
+  WAITING = 'WAITING',     // Sitting in DB waiting for connection
   CONNECTED = 'CONNECTED',
   DISCONNECTED = 'DISCONNECTED',
   ERROR = 'ERROR'
@@ -27,4 +27,10 @@ export interface ChatState {
 export interface PeerData {
   type: 'message' | 'typing' | 'disconnect';
   payload?: any;
+}
+
+export interface QueueRow {
+  id: number;
+  peer_id: string;
+  created_at: string;
 }

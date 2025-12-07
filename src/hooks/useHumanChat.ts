@@ -1,14 +1,11 @@
 import { useState, useCallback, useRef, useEffect } from 'react';
 import Peer, { DataConnection } from 'peerjs';
-import { Message, ChatMode, PeerData } from '../types';
+import { supabase } from '../lib/supabase';
+import { Message, ChatMode, PeerData, QueueRow } from '../types';
 import { 
   INITIAL_GREETING, 
   STRANGER_DISCONNECTED_MSG, 
-  WAITING_SLOTS, 
-  SLOT_PREFIX, 
-  ICE_SERVERS,
-  HUNT_TIMEOUT_MS,
-  HOST_DURATION_MS
+  ICE_SERVERS
 } from '../constants';
 
 export const useHumanChat = (active: boolean) => {
@@ -16,19 +13,20 @@ export const useHumanChat = (active: boolean) => {
   const [status, setStatus] = useState<ChatMode>(ChatMode.IDLE);
   const [partnerTyping, setPartnerTyping] = useState(false);
   
-  // Refs to keep track of instances without triggering re-renders
   const peerRef = useRef<Peer | null>(null);
   const connRef = useRef<DataConnection | null>(null);
-  const cycleTimeoutRef = useRef<NodeJS.Timeout | null>(null);
-  const huntTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const myPeerIdRef = useRef<string | null>(null);
   
-  // State to track debug info (optional, but good for stability)
-  const isHostRef = useRef(false);
+  // Track if we are currently sitting in the database queue
+  const isQueuedRef = useRef(false);
 
   // --- CLEANUP ---
-  const cleanup = useCallback(() => {
-    if (cycleTimeoutRef.current) clearTimeout(cycleTimeoutRef.current);
-    if (huntTimeoutRef.current) clearTimeout(huntTimeoutRef.current);
+  const cleanup = useCallback(async () => {
+    // If we were waiting in queue, remove ourselves
+    if (isQueuedRef.current && myPeerIdRef.current) {
+      await supabase.from('waiting_queue').delete().eq('peer_id', myPeerIdRef.current);
+      isQueuedRef.current = false;
+    }
 
     if (connRef.current) {
       try { connRef.current.close(); } catch (e) {}
@@ -40,8 +38,8 @@ export const useHumanChat = (active: boolean) => {
       peerRef.current = null;
     }
     
+    myPeerIdRef.current = null;
     setPartnerTyping(false);
-    isHostRef.current = false;
   }, []);
 
   // --- MESSAGING ---
@@ -66,7 +64,7 @@ export const useHumanChat = (active: boolean) => {
     }
   }, [status]);
 
-  // --- EVENT HANDLERS ---
+  // --- PEER SETUP ---
   const handleData = useCallback((data: PeerData) => {
     if (data.type === 'message') {
       setPartnerTyping(false);
@@ -85,11 +83,14 @@ export const useHumanChat = (active: boolean) => {
     }
   }, [cleanup]);
 
-  const setupConnection = useCallback((conn: DataConnection) => {
-    // Clear any pending matchmaking cycles
-    if (cycleTimeoutRef.current) clearTimeout(cycleTimeoutRef.current);
-    if (huntTimeoutRef.current) clearTimeout(huntTimeoutRef.current);
-    
+  const setupConnection = useCallback(async (conn: DataConnection) => {
+    // We found a match (either initiated or received).
+    // If we were in queue, remove ourselves immediately.
+    if (isQueuedRef.current && myPeerIdRef.current) {
+      await supabase.from('waiting_queue').delete().eq('peer_id', myPeerIdRef.current);
+      isQueuedRef.current = false;
+    }
+
     connRef.current = conn;
     
     conn.on('open', () => {
@@ -113,119 +114,104 @@ export const useHumanChat = (active: boolean) => {
     });
   }, [handleData, cleanup, status]);
 
-  // --- MATCHMAKING LOGIC ---
 
-  // Phase 2: HOSTING (Gatherer)
-  // We open a room with a specific ID and wait for a Hunter to find us.
-  const startHosting = useCallback(() => {
-    cleanup();
-    setStatus(ChatMode.PAIRING); // "Waiting for partner..."
-    isHostRef.current = true;
+  // --- MATCHMAKING (SUPABASE) ---
+  const findMatch = useCallback(async (peer: Peer, myId: string) => {
+    setStatus(ChatMode.SEARCHING);
+    
+    // 1. Look for someone waiting in the queue (oldest first)
+    // Filter out our own ID just in case
+    const { data: potentialMatches, error } = await supabase
+      .from('waiting_queue')
+      .select('*')
+      .neq('peer_id', myId)
+      .order('created_at', { ascending: true })
+      .limit(1);
 
-    // Pick a random slot to host
-    const slotId = Math.floor(Math.random() * WAITING_SLOTS);
-    const myPeerId = `${SLOT_PREFIX}${slotId}`;
+    if (error) {
+      console.error("Supabase error:", error);
+      // Fallback: just wait if DB fails
+      addToQueue(myId);
+      return;
+    }
 
-    const peer = new Peer(myPeerId, {
-      debug: 0,
-      config: { iceServers: ICE_SERVERS }
-    });
-    peerRef.current = peer;
-
-    peer.on('open', () => {
-      // We successfully claimed the slot. Wait for connection.
-      // If nobody joins in HOST_DURATION_MS, we give up and switch to hunting.
-      cycleTimeoutRef.current = setTimeout(() => {
-        // console.log("Host timed out, switching to Hunter");
-        startHunting();
-      }, HOST_DURATION_MS);
-    });
-
-    peer.on('connection', (conn) => {
-      // Success! Someone connected to us.
-      setupConnection(conn);
-    });
-
-    peer.on('error', (err: any) => {
-      // If ID is taken ('unavailable-id'), it means someone else is hosting this slot.
-      // We should switch to hunting immediately to try and connect to them.
-      if (err.type === 'unavailable-id') {
-        startHunting();
-      } else {
-        // Other errors, just retry hosting different slot
-        cycleTimeoutRef.current = setTimeout(startHosting, 1000);
-      }
-    });
-  }, [cleanup, setupConnection]);
-
-  // Phase 1: HUNTING (Client)
-  // We act as a client and try to connect to random slots.
-  const startHunting = useCallback(() => {
-    cleanup();
-    setStatus(ChatMode.SEARCHING); // "Searching for partner..."
-    isHostRef.current = false;
-
-    // Create an anonymous peer to be the hunter
-    const peer = new Peer({
-      debug: 0,
-      config: { iceServers: ICE_SERVERS }
-    });
-    peerRef.current = peer;
-
-    peer.on('open', () => {
-      // Try to connect to a random slot
-      const targetSlot = Math.floor(Math.random() * WAITING_SLOTS);
-      const targetPeerId = `${SLOT_PREFIX}${targetSlot}`;
+    // 2. FOUND SOMEONE
+    if (potentialMatches && potentialMatches.length > 0) {
+      const target = potentialMatches[0];
       
-      const conn = peer.connect(targetPeerId, { reliable: true });
+      // 3. CLAIM THEM (Atomic Delete)
+      // We try to delete their row. If we succeed, we own the connection.
+      // If we fail (0 rows deleted), someone else grabbed them, so we try again.
+      const { count } = await supabase
+        .from('waiting_queue')
+        .delete()
+        .eq('id', target.id); // Delete by unique Row ID
 
-      // If connection opens, we are good!
-      conn.on('open', () => {
+      if (count && count > 0) {
+        // Success! We claimed this user. Connect to them.
+        console.log("Match found! Connecting to:", target.peer_id);
+        const conn = peer.connect(target.peer_id, { reliable: true });
+        setupConnection(conn);
+      } else {
+        // Race condition: Someone else grabbed them. Recursively try again.
+        console.log("Match stolen, retrying...");
+        findMatch(peer, myId);
+      }
+    } 
+    // 3. NOBODY WAITING -> ADD SELF TO QUEUE
+    else {
+      addToQueue(myId);
+    }
+  }, [setupConnection]);
+
+  const addToQueue = useCallback(async (myId: string) => {
+    setStatus(ChatMode.WAITING);
+    isQueuedRef.current = true;
+    
+    // Insert into Supabase
+    const { error } = await supabase
+      .from('waiting_queue')
+      .insert([{ peer_id: myId }]);
+
+    if (error) {
+      console.error("Failed to add to queue:", error);
+      // If we can't join DB, we can't be found.
+      // Status remains 'WAITING' but effectively we are stuck until someone connects 
+      // (if PeerJS signaling works directly) or user retries.
+    }
+    // Now we just wait for peer.on('connection')
+  }, []);
+
+
+  const connect = useCallback(() => {
+    cleanup().then(() => {
+      setStatus(ChatMode.SEARCHING);
+
+      const peer = new Peer({
+        debug: 0,
+        config: { iceServers: ICE_SERVERS }
+      });
+      peerRef.current = peer;
+
+      peer.on('open', (id) => {
+        myPeerIdRef.current = id;
+        findMatch(peer, id);
+      });
+
+      peer.on('connection', (conn) => {
+        // Someone found us in the DB and connected!
         setupConnection(conn);
       });
 
-      // If connection fails/closes immediately (nobody home), try next or switch to host
-      conn.on('close', () => {
-         // This might fire if we connect but they disconnect immediately
-      });
-      
-      conn.on('error', () => {
-        // Connection failed
-      });
-
-      // Set a timeout. If we don't connect within HUNT_TIMEOUT_MS, try another slot or switch to hosting.
-      // We'll flip a coin: 70% chance to keep hunting, 30% chance to start hosting.
-      // This prevents everyone from getting stuck in "Hunt" mode.
-      huntTimeoutRef.current = setTimeout(() => {
-        if (connRef.current && connRef.current.open) return; // Already connected
-        
-        // Destroy this attempt
-        conn.close();
-        
-        // Decision: Hunt again or Host?
-        if (Math.random() > 0.3) {
-           startHunting(); // Recursively hunt again
-        } else {
-           startHosting(); // Switch to hosting
+      peer.on('error', (err) => {
+        console.error("Peer Error:", err);
+        // If fatal, cleanup
+        if (err.type === 'peer-unavailable' || err.type === 'network' || err.type === 'server-error') {
+           // Retry?
         }
-      }, HUNT_TIMEOUT_MS);
+      });
     });
-
-    peer.on('error', () => {
-      // Peer creation failed, retry
-      cycleTimeoutRef.current = setTimeout(startHunting, 1000);
-    });
-
-  }, [cleanup, setupConnection, startHosting]); // Added startHosting to dep array via circular logic handling below
-
-  // Circular dependency fix: startHosting needs startHunting, and vice versa.
-  // We use a ref or simple function hoisting, but since they are in same scope, it's fine.
-  // However, for useEffect, we need a stable entry point.
-  
-  const connect = useCallback(() => {
-    // Start by hunting. It feels faster for the user.
-    startHunting();
-  }, [startHunting]);
+  }, [cleanup, findMatch, setupConnection]);
 
   const disconnect = useCallback(() => {
     if (connRef.current && connRef.current.open) {
@@ -237,7 +223,7 @@ export const useHumanChat = (active: boolean) => {
   }, [cleanup]);
 
   useEffect(() => {
-    return () => cleanup();
+    return () => { cleanup(); };
   }, [cleanup]);
 
   return { 
