@@ -1,33 +1,41 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { Send, Hash, Loader2, Play, Users, Copy, Check } from 'lucide-react';
-import { Peer } from 'peerjs';
+import { Send, Loader2, Users, Bot, Zap, RefreshCw, EyeOff, MessageSquare } from 'lucide-react';
 import { Message, ChatMode, ChatType } from './types';
-import { INITIAL_GREETING, STRANGER_DISCONNECTED_MSG } from './constants';
-import { Header } from './components/Header';
+import { useHumanChat } from './hooks/useHumanChat';
 import { MessageBubble } from './components/MessageBubble';
 import { Button } from './components/Button';
+import { clsx } from 'clsx';
 
-// Hook for Random Stranger Chat (AI)
-const useStrangerChat = (active: boolean) => {
+// --- AI Chat Hook (Simulated Stranger) ---
+// Kept for "AI Companion" fallback if users want it
+const useAiChat = () => {
   const [messages, setMessages] = useState<Message[]>([]);
   const [status, setStatus] = useState<ChatMode>(ChatMode.IDLE);
+  const [partnerTyping, setPartnerTyping] = useState(false);
   const isTypingRef = useRef(false);
 
   const connect = useCallback(async () => {
     setStatus(ChatMode.SEARCHING);
     setMessages([]);
-    
-    // Simulate finding a match
-    const delay = Math.floor(Math.random() * 2000) + 1000;
     setTimeout(() => {
       setStatus(ChatMode.CONNECTED);
-      setMessages([INITIAL_GREETING]);
-    }, delay);
+      setMessages([{
+        id: 'init-ai',
+        text: "You're connected to an AI stranger. Say hi!",
+        sender: 'system',
+        timestamp: Date.now()
+      }]);
+    }, 1500);
   }, []);
 
   const disconnect = useCallback(() => {
     setStatus(ChatMode.DISCONNECTED);
-    setMessages(prev => [...prev, STRANGER_DISCONNECTED_MSG]);
+    setMessages(prev => [...prev, {
+      id: 'sys-disc-ai',
+      text: "Stranger has disconnected.",
+      sender: 'system',
+      timestamp: Date.now()
+    }]);
   }, []);
 
   const sendMessage = useCallback(async (text: string) => {
@@ -39,10 +47,10 @@ const useStrangerChat = (active: boolean) => {
     };
     setMessages(prev => [...prev, newMessage]);
 
-    // Send to backend
-    isTypingRef.current = true;
     try {
-      // Prepare history for API
+      isTypingRef.current = true;
+      setPartnerTyping(true);
+
       const history = messages.concat(newMessage).map(m => ({
         role: m.sender,
         content: m.text
@@ -61,7 +69,7 @@ const useStrangerChat = (active: boolean) => {
       let accumulatedText = '';
       const responseId = (Date.now() + 1).toString();
 
-      // Create placeholder for stranger message
+      setPartnerTyping(false);
       setMessages(prev => [...prev, {
         id: responseId,
         text: '',
@@ -72,168 +80,60 @@ const useStrangerChat = (active: boolean) => {
       while (true) {
         const { value, done } = await reader.read();
         if (done) break;
-        
         const chunk = decoder.decode(value, { stream: true });
         accumulatedText += chunk;
-        
-        // Update the last message
         setMessages(prev => prev.map(m => 
           m.id === responseId ? { ...m, text: accumulatedText } : m
         ));
       }
     } catch (err) {
       console.error("Failed to send message", err);
+      setPartnerTyping(false);
     } finally {
       isTypingRef.current = false;
     }
   }, [messages]);
 
-  return { messages, status, connect, disconnect, sendMessage, setMessages, setStatus };
+  return { messages, status, partnerTyping, connect, disconnect, sendMessage, sendTyping: () => {} };
 };
 
-// Hook for Friend Chat (PeerJS)
-const usePeerChat = (roomId: string | null) => {
-  const [messages, setMessages] = useState<Message[]>([]);
-  const [status, setStatus] = useState<ChatMode>(ChatMode.IDLE);
-  const [peerId, setPeerId] = useState<string | null>(null);
-  const peerRef = useRef<Peer | null>(null);
-  const connRef = useRef<any>(null);
-
-  useEffect(() => {
-    if (!roomId) return;
-
-    setStatus(ChatMode.SEARCHING);
-    
-    // If we have a hash in URL that matches roomId (and it's not 'new'), we are guest
-    // But for simplicity, we pass roomId. If it starts with 'host-', we are host.
-    
-    const isHost = !window.location.hash.includes('join=');
-    const myId = isHost ? roomId : `${roomId}-guest-${Math.random().toString(36).substr(2, 5)}`;
-    
-    const peer = new Peer(myId, {
-      debug: 1,
-    });
-    
-    peerRef.current = peer;
-
-    peer.on('open', (id) => {
-      console.log('My peer ID is: ' + id);
-      setPeerId(id);
-      
-      if (!isHost) {
-        // We are guest, connect to host
-        // The roomId passed to hook is the HOST id
-        const conn = peer.connect(roomId);
-        setupConnection(conn);
-      }
-    });
-
-    peer.on('connection', (conn) => {
-      // We are host, receiving connection
-      setupConnection(conn);
-    });
-
-    peer.on('error', (err) => {
-      console.error(err);
-      setStatus(ChatMode.ERROR);
-    });
-
-    const setupConnection = (conn: any) => {
-      connRef.current = conn;
-      
-      conn.on('open', () => {
-        setStatus(ChatMode.CONNECTED);
-        setMessages([INITIAL_GREETING]);
-      });
-
-      conn.on('data', (data: any) => {
-        if (data.type === 'message') {
-          setMessages(prev => [...prev, {
-            id: Date.now().toString(),
-            text: data.text,
-            sender: 'stranger',
-            timestamp: Date.now()
-          }]);
-        }
-      });
-
-      conn.on('close', () => {
-        setStatus(ChatMode.DISCONNECTED);
-        setMessages(prev => [...prev, STRANGER_DISCONNECTED_MSG]);
-      });
-    };
-
-    return () => {
-      peer.destroy();
-    };
-  }, [roomId]);
-
-  const sendMessage = useCallback((text: string) => {
-    if (connRef.current && status === ChatMode.CONNECTED) {
-      const msg = { type: 'message', text };
-      connRef.current.send(msg);
-      setMessages(prev => [...prev, {
-        id: Date.now().toString(),
-        text,
-        sender: 'me',
-        timestamp: Date.now()
-      }]);
-    }
-  }, [status]);
-
-  const disconnect = useCallback(() => {
-    if (connRef.current) connRef.current.close();
-    setStatus(ChatMode.IDLE);
-  }, []);
-
-  return { messages, status, sendMessage, disconnect, peerId };
-};
-
+// --- Main App ---
 export default function App() {
   const [mode, setMode] = useState<ChatType | null>(null);
-  const [onlineCount] = useState(() => Math.floor(Math.random() * 5000) + 12000);
+  const [onlineCount] = useState(() => Math.floor(Math.random() * 500) + 120);
   const [inputText, setInputText] = useState('');
+  const [vanishMode, setVanishMode] = useState(false);
+  
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const typingTimeoutRef = useRef<NodeJS.Timeout | null>(null);
 
-  // Peer State
-  const [peerRoomId, setPeerRoomId] = useState<string | null>(null);
-  const [copied, setCopied] = useState(false);
+  // Initialize Hooks
+  const humanChat = useHumanChat(mode === 'human');
+  const aiChat = useAiChat();
 
-  // Initialize URL check for friend join
+  // Determine active chat controller
+  const activeChat = mode === 'human' ? humanChat : aiChat;
+
+  // Auto-scroll to bottom
   useEffect(() => {
-    const hash = window.location.hash;
-    if (hash.includes('join=')) {
-      const id = hash.split('join=')[1];
-      if (id) {
-        setMode('peer');
-        setPeerRoomId(id);
-      }
+    if (messagesEndRef.current) {
+      messagesEndRef.current.scrollIntoView({ behavior: 'smooth' });
     }
-  }, []);
+  }, [activeChat.messages, activeChat.partnerTyping]);
 
-  // Hooks
-  const aiChat = useStrangerChat(mode === 'ai');
-  const peerChat = usePeerChat(mode === 'peer' ? peerRoomId : null);
-
-  const activeChat = mode === 'ai' ? aiChat : peerChat;
-
-  const scrollToBottom = () => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  };
-
+  // Handle Vanish Mode
   useEffect(() => {
-    scrollToBottom();
-  }, [activeChat.messages]);
+    if (vanishMode && (activeChat.status === ChatMode.DISCONNECTED || activeChat.status === ChatMode.IDLE)) {
+      // Clear messages if vanish mode is on and we disconnect
+      // This logic is handled by the component re-rendering empty states, 
+      // but conceptually we want the UI to respect "vanish" by not showing old history
+    }
+  }, [vanishMode, activeChat.status]);
 
-  const handleStartStranger = () => {
-    setMode('ai');
-    aiChat.connect();
-  };
-
-  const handleStartFriend = () => {
-    const newRoomId = `anon-${Math.random().toString(36).substr(2, 9)}`;
-    setPeerRoomId(newRoomId);
-    setMode('peer');
+  const handleStart = (type: ChatType) => {
+    setMode(type);
+    if (type === 'human') humanChat.connect();
+    else aiChat.connect();
   };
 
   const handleSendMessage = (e: React.FormEvent) => {
@@ -241,180 +141,203 @@ export default function App() {
     if (!inputText.trim()) return;
     activeChat.sendMessage(inputText);
     setInputText('');
+    activeChat.sendTyping(false);
   };
 
-  const handleDisconnect = () => {
+  const handleTyping = (e: React.ChangeEvent<HTMLInputElement>) => {
+    setInputText(e.target.value);
+    
+    if (mode === 'human') {
+      activeChat.sendTyping(true);
+      if (typingTimeoutRef.current) clearTimeout(typingTimeoutRef.current);
+      typingTimeoutRef.current = setTimeout(() => {
+        activeChat.sendTyping(false);
+      }, 1000);
+    }
+  };
+
+  const handleNewChat = () => {
+    activeChat.disconnect();
+    setTimeout(() => {
+      if (mode === 'human') humanChat.connect();
+      else aiChat.connect();
+    }, 100);
+  };
+
+  const handleExit = () => {
     activeChat.disconnect();
     setMode(null);
-    setPeerRoomId(null);
-    window.location.hash = '';
+    setInputText('');
   };
 
-  const copyInviteLink = () => {
-    const url = `${window.location.origin}/#join=${peerChat.peerId}`;
-    navigator.clipboard.writeText(url);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 2000);
-  };
-
-  // Renders
-
+  // --- 1. Landing Screen ---
   if (!mode) {
     return (
-      <div className="flex flex-col h-screen bg-slate-950 bg-[radial-gradient(ellipse_at_top,_var(--tw-gradient-stops))] from-slate-900 via-slate-950 to-slate-950">
-        <Header onlineCount={onlineCount} mode={ChatMode.IDLE} chatType={null} onDisconnect={() => {}} />
-        
-        <main className="flex-1 flex flex-col items-center justify-center p-6 text-center max-w-2xl mx-auto w-full">
-          <div className="mb-8 relative group">
-            <div className="absolute -inset-1 bg-gradient-to-r from-brand-500 to-purple-600 rounded-full blur opacity-25 group-hover:opacity-50 transition duration-1000 group-hover:duration-200"></div>
-            <div className="relative bg-slate-950 rounded-full p-6 border border-slate-800">
-              <Ghost size={64} className="text-brand-500" />
+      <div className="min-h-screen bg-slate-950 flex flex-col items-center justify-center p-6 relative overflow-hidden">
+        {/* Background Effects */}
+        <div className="absolute top-0 left-0 w-full h-full overflow-hidden z-0 pointer-events-none">
+          <div className="absolute top-[-10%] left-[-10%] w-[40%] h-[40%] bg-blue-500/10 rounded-full blur-[100px]"></div>
+          <div className="absolute bottom-[-10%] right-[-10%] w-[40%] h-[40%] bg-emerald-500/10 rounded-full blur-[100px]"></div>
+        </div>
+
+        <div className="z-10 w-full max-w-md space-y-8">
+          <div className="text-center space-y-2">
+            <div className="inline-flex items-center justify-center p-4 bg-slate-900 rounded-2xl mb-4 shadow-xl shadow-black/50 border border-slate-800">
+              <MessageSquare className="w-10 h-10 text-brand-500" />
             </div>
+            <h1 className="text-4xl font-bold text-white tracking-tight">Talk to Strangers</h1>
+            <p className="text-slate-400">Anonymous, 1-on-1, Disappearing messages.</p>
           </div>
-          
-          <h2 className="text-4xl md:text-5xl font-bold text-white mb-4 tracking-tight">
-            Talk to Strangers
-          </h2>
-          <p className="text-slate-400 text-lg mb-12 max-w-md mx-auto">
-            Experience anonymous, real-time conversations. No login required. Safe and instant.
-          </p>
-          
-          <div className="flex flex-col sm:flex-row gap-4 w-full max-w-md">
-            <Button 
-              onClick={handleStartStranger} 
-              fullWidth 
-              className="h-14 text-lg"
-            >
-              <Users className="w-5 h-5" />
-              Start Random Chat
-            </Button>
-            
-            <Button 
-              variant="secondary" 
-              onClick={handleStartFriend} 
-              fullWidth 
-              className="h-14 text-lg"
-            >
-              <Hash className="w-5 h-5" />
-              Chat with Friend
-            </Button>
-          </div>
-          
-          <p className="mt-8 text-xs text-slate-600 uppercase tracking-widest font-semibold">
-            {onlineCount.toLocaleString()} Users Online Now
-          </p>
-        </main>
-      </div>
-    );
-  }
 
-  // Searching / Loading Screen
-  if (activeChat.status === ChatMode.SEARCHING) {
-    return (
-      <div className="flex flex-col h-screen bg-slate-950">
-        <Header onlineCount={onlineCount} mode={ChatMode.SEARCHING} chatType={mode} onDisconnect={handleDisconnect} />
-        <div className="flex-1 flex flex-col items-center justify-center p-6">
-          <Loader2 className="w-12 h-12 text-brand-500 animate-spin mb-6" />
-          <h3 className="text-xl font-medium text-white mb-2">
-            {mode === 'ai' ? 'Looking for a random stranger...' : 'Waiting for connection...'}
-          </h3>
-          <p className="text-slate-500">
-            {mode === 'ai' ? 'Matching you with someone with similar interests.' : 'Share the link below with your friend.'}
-          </p>
-
-          {mode === 'peer' && peerChat.peerId && (
-            <div className="mt-8 bg-slate-900 border border-slate-800 p-4 rounded-xl w-full max-w-md">
-              <p className="text-sm text-slate-400 mb-2">Send this link to your friend:</p>
-              <div className="flex gap-2">
-                <input 
-                  readOnly 
-                  value={`${window.location.origin}/#join=${peerChat.peerId}`}
-                  className="flex-1 bg-slate-950 border border-slate-800 rounded px-3 py-2 text-sm text-slate-300 font-mono focus:outline-none"
-                />
-                <button 
-                  onClick={copyInviteLink}
-                  className="bg-brand-500 hover:bg-brand-600 text-white rounded px-3 transition-colors flex items-center justify-center min-w-[44px]"
-                >
-                  {copied ? <Check size={18} /> : <Copy size={18} />}
-                </button>
+          <div className="space-y-4">
+            <Button 
+              onClick={() => handleStart('human')} 
+              fullWidth 
+              className="h-16 text-lg bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 border-0"
+            >
+              <div className="flex items-center gap-3">
+                <Users className="w-6 h-6" />
+                <div className="flex flex-col items-start">
+                  <span className="font-bold">Start Chatting</span>
+                  <span className="text-xs opacity-75 font-normal">Connect with a random person</span>
+                </div>
               </div>
+            </Button>
+
+            <Button 
+              onClick={() => handleStart('ai')} 
+              fullWidth 
+              variant="secondary"
+              className="h-14"
+            >
+              <div className="flex items-center gap-3">
+                <Bot className="w-5 h-5" />
+                <span>Practice with AI</span>
+              </div>
+            </Button>
+          </div>
+
+          <div className="flex justify-center pt-8">
+            <div className="flex items-center gap-2 text-xs font-medium text-emerald-500 bg-emerald-500/10 px-3 py-1.5 rounded-full">
+              <span className="relative flex h-2 w-2">
+                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+                <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span>
+              </span>
+              {onlineCount.toLocaleString()} people online now
             </div>
-          )}
-          
-          <Button variant="ghost" onClick={handleDisconnect} className="mt-8">
-            Cancel
-          </Button>
+          </div>
         </div>
       </div>
     );
   }
 
-  // Main Chat Interface
+  // --- 2. Searching Screen ---
+  if (activeChat.status === ChatMode.SEARCHING || activeChat.status === ChatMode.PAIRING) {
+    return (
+      <div className="h-screen bg-slate-950 flex flex-col items-center justify-center p-6 text-center">
+        <div className="relative mb-8">
+          <div className="absolute inset-0 bg-brand-500 blur-2xl opacity-20 animate-pulse"></div>
+          <Loader2 className="w-16 h-16 text-brand-500 animate-spin relative z-10" />
+        </div>
+        
+        <h2 className="text-2xl font-bold text-white mb-2">Looking for someone...</h2>
+        <p className="text-slate-500 max-w-xs mx-auto animate-pulse">
+          {activeChat.status === ChatMode.PAIRING 
+            ? 'Waiting for partner to connect...' 
+            : 'Searching for an available partner in the queue...'}
+        </p>
+        
+        <Button variant="ghost" onClick={handleExit} className="mt-8">
+          Cancel
+        </Button>
+      </div>
+    );
+  }
+
+  // --- 3. Chat Screen ---
   return (
     <div className="flex flex-col h-screen bg-slate-950">
-      <Header 
-        onlineCount={onlineCount} 
-        mode={activeChat.status} 
-        chatType={mode}
-        onDisconnect={handleDisconnect} 
-      />
+      {/* Header */}
+      <header className="h-16 px-4 bg-slate-900 border-b border-slate-800 flex items-center justify-between shrink-0">
+        <div className="flex items-center gap-3">
+          <div className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></div>
+          <div>
+            <h3 className="font-bold text-white text-sm">
+              {activeChat.status === ChatMode.CONNECTED ? 'Stranger' : 'Disconnected'}
+            </h3>
+            {activeChat.partnerTyping && (
+              <p className="text-xs text-brand-400 font-medium animate-pulse">typing...</p>
+            )}
+          </div>
+        </div>
 
-      {/* Messages Area */}
-      <div className="flex-1 overflow-y-auto p-4 md:p-6 space-y-4">
+        <div className="flex items-center gap-2">
+           <button
+             onClick={() => setVanishMode(!vanishMode)}
+             className={clsx(
+               "p-2 rounded-lg transition-colors",
+               vanishMode ? "bg-purple-500/20 text-purple-400" : "hover:bg-slate-800 text-slate-500"
+             )}
+             title="Vanish Mode: Messages disappear on disconnect"
+           >
+             <EyeOff size={20} />
+           </button>
+           
+           <Button 
+             variant="danger" 
+             className="px-4 py-1.5 h-9 text-xs"
+             onClick={handleExit}
+           >
+             Stop
+           </Button>
+        </div>
+      </header>
+
+      {/* Messages */}
+      <div className="flex-1 overflow-y-auto p-4 space-y-4">
         {activeChat.messages.map((msg) => (
           <MessageBubble key={msg.id} message={msg} />
         ))}
+        
+        {/* Disconnect State */}
         {activeChat.status === ChatMode.DISCONNECTED && (
-          <div className="flex justify-center mt-8">
-            <Button onClick={mode === 'ai' ? handleStartStranger : handleStartFriend}>
-              Find New Partner
-            </Button>
+          <div className="py-8 flex flex-col items-center gap-4">
+            <p className="text-slate-500 text-sm">Conversation ended.</p>
+            <div className="flex gap-3">
+              <Button onClick={handleNewChat} className="shadow-lg shadow-brand-500/20">
+                <RefreshCw size={18} />
+                New Chat
+              </Button>
+              <Button variant="secondary" onClick={handleExit}>
+                Home
+              </Button>
+            </div>
           </div>
         )}
         <div ref={messagesEndRef} />
       </div>
 
-      {/* Input Area */}
-      <div className="p-4 bg-slate-950 border-t border-slate-800">
-        <form onSubmit={handleSendMessage} className="max-w-4xl mx-auto flex gap-3 relative">
+      {/* Input */}
+      <div className="p-4 bg-slate-900 border-t border-slate-800 shrink-0">
+        <form onSubmit={handleSendMessage} className="flex gap-2 max-w-4xl mx-auto">
           <input
             type="text"
             value={inputText}
-            onChange={(e) => setInputText(e.target.value)}
+            onChange={handleTyping}
             disabled={activeChat.status !== ChatMode.CONNECTED}
-            placeholder={activeChat.status === ChatMode.CONNECTED ? "Type a message..." : "Disconnected"}
-            className="flex-1 bg-slate-900 border border-slate-700 rounded-xl px-4 py-3 text-white placeholder-slate-500 focus:outline-none focus:border-brand-500 focus:ring-1 focus:ring-brand-500 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+            placeholder={activeChat.status === ChatMode.CONNECTED ? "Type a message..." : "Stranger has disconnected"}
+            className="flex-1 bg-slate-950 border border-slate-700 rounded-xl px-4 text-white focus:outline-none focus:border-brand-500 transition-colors disabled:opacity-50"
+            autoFocus
           />
           <button
             type="submit"
             disabled={!inputText.trim() || activeChat.status !== ChatMode.CONNECTED}
-            className="bg-brand-500 hover:bg-brand-600 disabled:bg-slate-800 disabled:text-slate-600 text-white rounded-xl px-5 flex items-center justify-center transition-all transform active:scale-95"
+            className="bg-brand-500 hover:bg-brand-600 disabled:opacity-50 disabled:hover:bg-brand-500 text-white rounded-xl p-3 transition-colors"
           >
             <Send size={20} />
           </button>
         </form>
       </div>
     </div>
-  );
-}
-
-function Ghost({ className, size }: { className?: string, size?: number }) {
-  return (
-    <svg 
-      xmlns="http://www.w3.org/2000/svg" 
-      width={size || 24} 
-      height={size || 24} 
-      viewBox="0 0 24 24" 
-      fill="none" 
-      stroke="currentColor" 
-      strokeWidth="2" 
-      strokeLinecap="round" 
-      strokeLinejoin="round" 
-      className={className}
-    >
-      <path d="M9 10h.01" />
-      <path d="M15 10h.01" />
-      <path d="M12 2a8 8 0 0 0-8 8v12l3-3 2.5 2.5L12 19l2.5 2.5L17 19l3 3V10a8 8 0 0 0-8-8z" />
-    </svg>
   );
 }

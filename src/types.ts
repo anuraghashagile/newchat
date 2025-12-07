@@ -1,6 +1,7 @@
 export enum ChatMode {
   IDLE = 'IDLE',
   SEARCHING = 'SEARCHING',
+  PAIRING = 'PAIRING',
   CONNECTED = 'CONNECTED',
   DISCONNECTED = 'DISCONNECTED',
   ERROR = 'ERROR'
@@ -11,11 +12,19 @@ export interface Message {
   text: string;
   sender: 'me' | 'stranger' | 'system';
   timestamp: number;
+  isVanish?: boolean;
 }
 
-export interface PeerState {
-  isHost: boolean;
-  roomId: string | null;
+export type ChatType = 'ai' | 'human';
+
+export interface ChatState {
+  mode: ChatMode;
+  isTyping: boolean;
+  partnerTyping: boolean;
+  vanishMode: boolean;
 }
 
-export type ChatType = 'ai' | 'peer';
+export interface PeerData {
+  type: 'message' | 'typing' | 'disconnect';
+  payload?: any;
+}
