@@ -4,7 +4,8 @@ export enum ChatMode {
   WAITING = 'WAITING',     // Sitting in DB waiting for connection
   CONNECTED = 'CONNECTED',
   DISCONNECTED = 'DISCONNECTED',
-  ERROR = 'ERROR'
+  ERROR = 'ERROR',
+  FATAL_ERROR = 'FATAL_ERROR' // Database missing or misconfigured
 }
 
 export interface Message {

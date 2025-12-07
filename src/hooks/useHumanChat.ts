@@ -1,7 +1,7 @@
 import { useState, useCallback, useRef, useEffect } from 'react';
 import Peer, { DataConnection } from 'peerjs';
 import { supabase } from '../lib/supabase';
-import { Message, ChatMode, PeerData, QueueRow } from '../types';
+import { Message, ChatMode, PeerData } from '../types';
 import { 
   INITIAL_GREETING, 
   STRANGER_DISCONNECTED_MSG, 
@@ -24,7 +24,8 @@ export const useHumanChat = (active: boolean) => {
   const cleanup = useCallback(async () => {
     // If we were waiting in queue, remove ourselves
     if (isQueuedRef.current && myPeerIdRef.current) {
-      await supabase.from('waiting_queue').delete().eq('peer_id', myPeerIdRef.current);
+      const { error } = await supabase.from('waiting_queue').delete().eq('peer_id', myPeerIdRef.current);
+      if (error) console.error("Cleanup error:", error);
       isQueuedRef.current = false;
     }
 
@@ -119,8 +120,7 @@ export const useHumanChat = (active: boolean) => {
   const findMatch = useCallback(async (peer: Peer, myId: string) => {
     setStatus(ChatMode.SEARCHING);
     
-    // 1. Look for someone waiting in the queue (oldest first)
-    // Filter out our own ID just in case
+    // 1. Look for someone waiting in the queue
     const { data: potentialMatches, error } = await supabase
       .from('waiting_queue')
       .select('*')
@@ -128,10 +128,11 @@ export const useHumanChat = (active: boolean) => {
       .order('created_at', { ascending: true })
       .limit(1);
 
+    // CRITICAL: Handle Supabase Setup Errors
     if (error) {
-      console.error("Supabase error:", error);
-      // Fallback: just wait if DB fails
-      addToQueue(myId);
+      console.error("Supabase error (findMatch):", error);
+      // If ANY error happens (404, 401, RLS), we assume setup is wrong
+      setStatus(ChatMode.FATAL_ERROR);
       return;
     }
 
@@ -140,20 +141,23 @@ export const useHumanChat = (active: boolean) => {
       const target = potentialMatches[0];
       
       // 3. CLAIM THEM (Atomic Delete)
-      // We try to delete their row. If we succeed, we own the connection.
-      // If we fail (0 rows deleted), someone else grabbed them, so we try again.
-      const { count } = await supabase
+      const { count, error: deleteError } = await supabase
         .from('waiting_queue')
         .delete()
-        .eq('id', target.id); // Delete by unique Row ID
+        .eq('id', target.id); 
+
+      if (deleteError) {
+        console.error("Supabase error (delete):", deleteError);
+        // If we can't delete, it's likely RLS
+        setStatus(ChatMode.FATAL_ERROR);
+        return;
+      }
 
       if (count && count > 0) {
-        // Success! We claimed this user. Connect to them.
         console.log("Match found! Connecting to:", target.peer_id);
         const conn = peer.connect(target.peer_id, { reliable: true });
         setupConnection(conn);
       } else {
-        // Race condition: Someone else grabbed them. Recursively try again.
         console.log("Match stolen, retrying...");
         findMatch(peer, myId);
       }
@@ -175,11 +179,10 @@ export const useHumanChat = (active: boolean) => {
 
     if (error) {
       console.error("Failed to add to queue:", error);
-      // If we can't join DB, we can't be found.
-      // Status remains 'WAITING' but effectively we are stuck until someone connects 
-      // (if PeerJS signaling works directly) or user retries.
+      // If RLS blocks us or table missing, show fatal error
+      setStatus(ChatMode.FATAL_ERROR);
+      return;
     }
-    // Now we just wait for peer.on('connection')
   }, []);
 
 
@@ -205,10 +208,6 @@ export const useHumanChat = (active: boolean) => {
 
       peer.on('error', (err) => {
         console.error("Peer Error:", err);
-        // If fatal, cleanup
-        if (err.type === 'peer-unavailable' || err.type === 'network' || err.type === 'server-error') {
-           // Retry?
-        }
       });
     });
   }, [cleanup, findMatch, setupConnection]);
