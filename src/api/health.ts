@@ -1,20 +1,2 @@
-export const config = {
-  runtime: 'edge',
-};
-
-export default function handler(request: Request) {
-  return new Response(
-    JSON.stringify({
-      status: 'ok',
-      timestamp: Date.now(),
-      service: 'anon-chat-signaling'
-    }),
-    {
-      status: 200,
-      headers: {
-        'Content-Type': 'application/json',
-        'Cache-Control': 'no-cache'
-      }
-    }
-  );
-}
+// This file has been moved to /api/health.ts to support Vercel Serverless Functions.
+// Please do not use this file.

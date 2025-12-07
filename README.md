@@ -35,9 +35,17 @@ This ensures 100% uptime, zero database costs, and instant scalability without m
 
 ## 🛠️ Local Development
 
+To run the full stack (Frontend + API) locally, use the Vercel CLI.
+
+1. Install Vercel CLI:
 ```bash
-npm install
-npm run dev
+npm install -g vercel
 ```
 
-Open `http://localhost:5173` in two different browser windows to test pairing with yourself.
+2. Start the development server:
+```bash
+vercel dev
+```
+This will start the app at `http://localhost:3000`.
+
+*Note: `npm run dev` will only start the frontend (Vite) and the API routes will not be active.*
