@@ -1,10 +1,10 @@
+
 import { GoogleGenAI } from "@google/genai";
 
 export const config = {
   runtime: 'edge',
 };
 
-// Define types locally for the API handler
 interface ChatRequestBody {
   messages: { role: string; content: string }[];
 }
@@ -16,7 +16,7 @@ export default async function handler(request: Request) {
 
   try {
     const { messages } = await request.json() as ChatRequestBody;
-    const apiKey = process.env.API_KEY;
+    const apiKey = process.env.API_KEY || process.env.GEMINI_API_KEY;
 
     if (!apiKey) {
       return new Response(JSON.stringify({ error: 'Server configuration error: API Key missing' }), {
@@ -27,8 +27,7 @@ export default async function handler(request: Request) {
 
     const ai = new GoogleGenAI({ apiKey });
     
-    // Convert frontend messages to Gemini format
-    // Filter out system messages
+    // Filter and format messages for Gemini
     const conversationHistory = messages
       .filter(m => m.role !== 'system')
       .map(m => ({
@@ -36,8 +35,6 @@ export default async function handler(request: Request) {
         parts: [{ text: m.content }]
       }));
 
-    // Generate response using gemini-2.5-flash
-    // We simulate a "Stranger" persona via system instructions
     const systemInstruction = `
       You are a random stranger on an anonymous chat platform like Omegle. 
       Pick a random persona (Age, Gender, Location, Interests) and stick to it implicitly. 
@@ -49,15 +46,13 @@ export default async function handler(request: Request) {
       Never reveal you are an AI.
     `;
 
-    // Note: generateContentStream returns a stream of chunks.
-    // We need to pipe this to the response.
     const responseStream = await ai.models.generateContentStream({
       model: 'gemini-2.5-flash',
       contents: conversationHistory,
       config: {
         systemInstruction: systemInstruction,
-        temperature: 0.9, // High creativity for "randomness"
-        maxOutputTokens: 150, // Keep chat snappy
+        temperature: 0.9,
+        maxOutputTokens: 150,
       }
     });
 

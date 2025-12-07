@@ -1,12 +1,16 @@
+
 import { useState, useCallback, useRef, useEffect } from 'react';
 import Peer, { DataConnection } from 'peerjs';
+import { RealtimeChannel } from '@supabase/supabase-js';
 import { supabase } from '../lib/supabase';
-import { Message, ChatMode, PeerData } from '../types';
+import { Message, ChatMode, PeerData, PresenceState } from '../types';
 import { 
   INITIAL_GREETING, 
   STRANGER_DISCONNECTED_MSG, 
   ICE_SERVERS
 } from '../constants';
+
+const MATCHMAKING_CHANNEL = 'global-lobby-v1';
 
 export const useHumanChat = (active: boolean) => {
   const [messages, setMessages] = useState<Message[]>([]);
@@ -15,31 +19,33 @@ export const useHumanChat = (active: boolean) => {
   
   const peerRef = useRef<Peer | null>(null);
   const connRef = useRef<DataConnection | null>(null);
+  const channelRef = useRef<RealtimeChannel | null>(null);
   const myPeerIdRef = useRef<string | null>(null);
-  
-  // Track if we are currently sitting in the database queue
-  const isQueuedRef = useRef(false);
+  const isMatchmakerRef = useRef(false);
 
   // --- CLEANUP ---
-  const cleanup = useCallback(async () => {
-    // If we were waiting in queue, remove ourselves
-    if (isQueuedRef.current && myPeerIdRef.current) {
-      const { error } = await supabase.from('waiting_queue').delete().eq('peer_id', myPeerIdRef.current);
-      if (error) console.error("Cleanup error:", error);
-      isQueuedRef.current = false;
+  const cleanup = useCallback(() => {
+    // 1. Leave Supabase Channel
+    if (channelRef.current) {
+      channelRef.current.untrack(); // Remove self from lobby
+      supabase.removeChannel(channelRef.current);
+      channelRef.current = null;
     }
 
+    // 2. Close PeerJS Connection
     if (connRef.current) {
       try { connRef.current.close(); } catch (e) {}
       connRef.current = null;
     }
 
+    // 3. Destroy Peer
     if (peerRef.current) {
       try { peerRef.current.destroy(); } catch (e) {}
       peerRef.current = null;
     }
     
     myPeerIdRef.current = null;
+    isMatchmakerRef.current = false;
     setPartnerTyping(false);
   }, []);
 
@@ -65,7 +71,7 @@ export const useHumanChat = (active: boolean) => {
     }
   }, [status]);
 
-  // --- PEER SETUP ---
+  // --- PEER DATA HANDLING ---
   const handleData = useCallback((data: PeerData) => {
     if (data.type === 'message') {
       setPartnerTyping(false);
@@ -84,12 +90,10 @@ export const useHumanChat = (active: boolean) => {
     }
   }, [cleanup]);
 
-  const setupConnection = useCallback(async (conn: DataConnection) => {
-    // We found a match (either initiated or received).
-    // If we were in queue, remove ourselves immediately.
-    if (isQueuedRef.current && myPeerIdRef.current) {
-      await supabase.from('waiting_queue').delete().eq('peer_id', myPeerIdRef.current);
-      isQueuedRef.current = false;
+  const setupConnection = useCallback((conn: DataConnection) => {
+    // If we were waiting in lobby, leave it now
+    if (channelRef.current) {
+      channelRef.current.untrack();
     }
 
     connRef.current = conn;
@@ -110,107 +114,95 @@ export const useHumanChat = (active: boolean) => {
     });
     
     conn.on('error', () => {
+      // If connection fails during setup, go back to searching
+      if (status !== ChatMode.CONNECTED) {
+        // Retry logic could go here, but for now safe fail
+      }
       cleanup();
       setStatus(ChatMode.DISCONNECTED);
     });
   }, [handleData, cleanup, status]);
 
-
-  // --- MATCHMAKING (SUPABASE) ---
-  const findMatch = useCallback(async (peer: Peer, myId: string) => {
+  // --- MATCHMAKING LOGIC ---
+  const joinLobby = useCallback((myId: string) => {
     setStatus(ChatMode.SEARCHING);
     
-    // 1. Look for someone waiting in the queue
-    const { data: potentialMatches, error } = await supabase
-      .from('waiting_queue')
-      .select('*')
-      .neq('peer_id', myId)
-      .order('created_at', { ascending: true })
-      .limit(1);
+    const channel = supabase.channel(MATCHMAKING_CHANNEL, {
+      config: { presence: { key: myId } }
+    });
+    channelRef.current = channel;
 
-    // CRITICAL: Handle Supabase Setup Errors
-    if (error) {
-      console.error("Supabase error (findMatch):", error);
-      // If ANY error happens (404, 401, RLS), we assume setup is wrong
-      setStatus(ChatMode.FATAL_ERROR);
-      return;
-    }
+    channel
+      .on('presence', { event: 'sync' }, () => {
+        // 1. Get state
+        const newState = channel.presenceState<PresenceState>();
+        
+        // 2. If I am already connecting/connected, ignore updates
+        if (isMatchmakerRef.current || connRef.current?.open) return;
 
-    // 2. FOUND SOMEONE
-    if (potentialMatches && potentialMatches.length > 0) {
-      const target = potentialMatches[0];
-      
-      // 3. CLAIM THEM (Atomic Delete)
-      const { count, error: deleteError } = await supabase
-        .from('waiting_queue')
-        .delete()
-        .eq('id', target.id); 
+        // 3. Find a target
+        const users = Object.values(newState).flat();
+        
+        // Filter: Not me, and Status is 'waiting'
+        const potentialPartner = users.find(u => 
+          u.peerId !== myId && u.status === 'waiting'
+        );
 
-      if (deleteError) {
-        console.error("Supabase error (delete):", deleteError);
-        // If we can't delete, it's likely RLS
-        setStatus(ChatMode.FATAL_ERROR);
-        return;
-      }
+        if (potentialPartner) {
+          // 4. FOUND SOMEONE - I AM THE HUNTER
+          console.log("Found partner:", potentialPartner.peerId);
+          isMatchmakerRef.current = true; // Stop hunting
+          
+          // Connect to them
+          const conn = peerRef.current?.connect(potentialPartner.peerId, { reliable: true });
+          if (conn) {
+            setupConnection(conn);
+          }
+        }
+      })
+      .subscribe(async (status) => {
+        if (status === 'SUBSCRIBED') {
+          // Initial join: Broadcast that I am waiting
+          await channel.track({
+            peerId: myId,
+            status: 'waiting',
+            timestamp: Date.now()
+          });
+          setStatus(ChatMode.WAITING);
+        }
+      });
 
-      if (count && count > 0) {
-        console.log("Match found! Connecting to:", target.peer_id);
-        const conn = peer.connect(target.peer_id, { reliable: true });
-        setupConnection(conn);
-      } else {
-        console.log("Match stolen, retrying...");
-        findMatch(peer, myId);
-      }
-    } 
-    // 3. NOBODY WAITING -> ADD SELF TO QUEUE
-    else {
-      addToQueue(myId);
-    }
   }, [setupConnection]);
-
-  const addToQueue = useCallback(async (myId: string) => {
-    setStatus(ChatMode.WAITING);
-    isQueuedRef.current = true;
-    
-    // Insert into Supabase
-    const { error } = await supabase
-      .from('waiting_queue')
-      .insert([{ peer_id: myId }]);
-
-    if (error) {
-      console.error("Failed to add to queue:", error);
-      // If RLS blocks us or table missing, show fatal error
-      setStatus(ChatMode.FATAL_ERROR);
-      return;
-    }
-  }, []);
 
 
   const connect = useCallback(() => {
-    cleanup().then(() => {
-      setStatus(ChatMode.SEARCHING);
-
-      const peer = new Peer({
-        debug: 0,
-        config: { iceServers: ICE_SERVERS }
-      });
-      peerRef.current = peer;
-
-      peer.on('open', (id) => {
-        myPeerIdRef.current = id;
-        findMatch(peer, id);
-      });
-
-      peer.on('connection', (conn) => {
-        // Someone found us in the DB and connected!
-        setupConnection(conn);
-      });
-
-      peer.on('error', (err) => {
-        console.error("Peer Error:", err);
-      });
+    cleanup(); // Clean old sessions
+    
+    // Create new Peer
+    const peer = new Peer({
+      debug: 0,
+      config: { iceServers: ICE_SERVERS }
     });
-  }, [cleanup, findMatch, setupConnection]);
+    peerRef.current = peer;
+
+    peer.on('open', (id) => {
+      myPeerIdRef.current = id;
+      joinLobby(id);
+    });
+
+    // If someone connects to ME (I was the waiter)
+    peer.on('connection', (conn) => {
+      isMatchmakerRef.current = true; // Stop listening to presence
+      setupConnection(conn);
+    });
+
+    peer.on('error', (err) => {
+      console.error("Peer Error:", err);
+      // If fatal error, we might want to restart
+      setStatus(ChatMode.ERROR);
+    });
+
+  }, [cleanup, joinLobby, setupConnection]);
 
   const disconnect = useCallback(() => {
     if (connRef.current && connRef.current.open) {

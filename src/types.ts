@@ -1,11 +1,11 @@
+
 export enum ChatMode {
   IDLE = 'IDLE',
-  SEARCHING = 'SEARCHING', // Looking for someone in DB
-  WAITING = 'WAITING',     // Sitting in DB waiting for connection
+  SEARCHING = 'SEARCHING',
+  WAITING = 'WAITING',
   CONNECTED = 'CONNECTED',
   DISCONNECTED = 'DISCONNECTED',
-  ERROR = 'ERROR',
-  FATAL_ERROR = 'FATAL_ERROR' // Database missing or misconfigured
+  ERROR = 'ERROR'
 }
 
 export interface Message {
@@ -30,8 +30,9 @@ export interface PeerData {
   payload?: any;
 }
 
-export interface QueueRow {
-  id: number;
-  peer_id: string;
-  created_at: string;
+// Presence state for the lobby
+export interface PresenceState {
+  peerId: string;
+  status: 'waiting' | 'paired';
+  timestamp: number;
 }
