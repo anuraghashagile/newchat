@@ -1,7 +1,7 @@
 export enum ChatMode {
   IDLE = 'IDLE',
-  SEARCHING = 'SEARCHING',
-  PAIRING = 'PAIRING',
+  SEARCHING = 'SEARCHING', // Hunting (Client)
+  PAIRING = 'PAIRING',     // Hosting (Server)
   CONNECTED = 'CONNECTED',
   DISCONNECTED = 'DISCONNECTED',
   ERROR = 'ERROR'

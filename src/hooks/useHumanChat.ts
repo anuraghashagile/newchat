@@ -1,35 +1,50 @@
 import { useState, useCallback, useRef, useEffect } from 'react';
 import Peer, { DataConnection } from 'peerjs';
 import { Message, ChatMode, PeerData } from '../types';
-import { INITIAL_GREETING, STRANGER_DISCONNECTED_MSG, WAITING_SLOTS, SLOT_PREFIX } from '../constants';
+import { 
+  INITIAL_GREETING, 
+  STRANGER_DISCONNECTED_MSG, 
+  WAITING_SLOTS, 
+  SLOT_PREFIX, 
+  ICE_SERVERS,
+  HUNT_TIMEOUT_MS,
+  HOST_DURATION_MS
+} from '../constants';
 
 export const useHumanChat = (active: boolean) => {
   const [messages, setMessages] = useState<Message[]>([]);
   const [status, setStatus] = useState<ChatMode>(ChatMode.IDLE);
   const [partnerTyping, setPartnerTyping] = useState(false);
   
+  // Refs to keep track of instances without triggering re-renders
   const peerRef = useRef<Peer | null>(null);
   const connRef = useRef<DataConnection | null>(null);
-  const cleanupRef = useRef<NodeJS.Timeout | null>(null);
+  const cycleTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const huntTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  
+  // State to track debug info (optional, but good for stability)
+  const isHostRef = useRef(false);
 
-  // cleanup function to destroy connections
+  // --- CLEANUP ---
   const cleanup = useCallback(() => {
-    if (cleanupRef.current) clearTimeout(cleanupRef.current);
-    
+    if (cycleTimeoutRef.current) clearTimeout(cycleTimeoutRef.current);
+    if (huntTimeoutRef.current) clearTimeout(huntTimeoutRef.current);
+
     if (connRef.current) {
       try { connRef.current.close(); } catch (e) {}
       connRef.current = null;
     }
-    
+
     if (peerRef.current) {
       try { peerRef.current.destroy(); } catch (e) {}
       peerRef.current = null;
     }
     
     setPartnerTyping(false);
+    isHostRef.current = false;
   }, []);
 
-  // Send a text message
+  // --- MESSAGING ---
   const sendMessage = useCallback((text: string) => {
     if (connRef.current && status === ChatMode.CONNECTED) {
       const payload: PeerData = { type: 'message', payload: text };
@@ -44,7 +59,6 @@ export const useHumanChat = (active: boolean) => {
     }
   }, [status]);
 
-  // Send typing status
   const sendTyping = useCallback((isTyping: boolean) => {
     if (connRef.current && status === ChatMode.CONNECTED) {
       const payload: PeerData = { type: 'typing', payload: isTyping };
@@ -52,7 +66,7 @@ export const useHumanChat = (active: boolean) => {
     }
   }, [status]);
 
-  // Handle incoming data
+  // --- EVENT HANDLERS ---
   const handleData = useCallback((data: PeerData) => {
     if (data.type === 'message') {
       setPartnerTyping(false);
@@ -67,13 +81,17 @@ export const useHumanChat = (active: boolean) => {
     } else if (data.type === 'disconnect') {
       setStatus(ChatMode.DISCONNECTED);
       setMessages(prev => [...prev, STRANGER_DISCONNECTED_MSG]);
+      cleanup();
     }
-  }, []);
+  }, [cleanup]);
 
-  // Setup connection handlers
   const setupConnection = useCallback((conn: DataConnection) => {
+    // Clear any pending matchmaking cycles
+    if (cycleTimeoutRef.current) clearTimeout(cycleTimeoutRef.current);
+    if (huntTimeoutRef.current) clearTimeout(huntTimeoutRef.current);
+    
     connRef.current = conn;
-
+    
     conn.on('open', () => {
       setStatus(ChatMode.CONNECTED);
       setMessages([INITIAL_GREETING]);
@@ -82,93 +100,132 @@ export const useHumanChat = (active: boolean) => {
     conn.on('data', (data: any) => handleData(data));
 
     conn.on('close', () => {
-      setStatus(ChatMode.DISCONNECTED);
-      setMessages(prev => [...prev, STRANGER_DISCONNECTED_MSG]);
-      setPartnerTyping(false);
+      if (status === ChatMode.CONNECTED) {
+        setStatus(ChatMode.DISCONNECTED);
+        setMessages(prev => [...prev, STRANGER_DISCONNECTED_MSG]);
+      }
+      cleanup();
     });
     
     conn.on('error', () => {
+      cleanup();
       setStatus(ChatMode.DISCONNECTED);
     });
-  }, [handleData]);
+  }, [handleData, cleanup, status]);
 
-  // The Core Matchmaking Logic
-  // Strategy: Randomly try to occupy a slot. If occupied, connect to the occupier.
-  const findStranger = useCallback(() => {
+  // --- MATCHMAKING LOGIC ---
+
+  // Phase 2: HOSTING (Gatherer)
+  // We open a room with a specific ID and wait for a Hunter to find us.
+  const startHosting = useCallback(() => {
     cleanup();
-    setStatus(ChatMode.SEARCHING);
-    setMessages([]);
+    setStatus(ChatMode.PAIRING); // "Waiting for partner..."
+    isHostRef.current = true;
 
-    // 1. Pick a random slot
+    // Pick a random slot to host
     const slotId = Math.floor(Math.random() * WAITING_SLOTS);
     const myPeerId = `${SLOT_PREFIX}${slotId}`;
 
     const peer = new Peer(myPeerId, {
       debug: 0,
-      config: {
-        iceServers: [
-          { urls: 'stun:stun.l.google.com:19302' },
-          { urls: 'stun:global.stun.twilio.com:3478' }
-        ]
-      }
+      config: { iceServers: ICE_SERVERS }
     });
     peerRef.current = peer;
 
-    // A. If we successfully open with ID, we are the HOST (Waiting in queue)
     peer.on('open', () => {
-      setStatus(ChatMode.PAIRING); // Pairing means "Waiting for someone to join me"
+      // We successfully claimed the slot. Wait for connection.
+      // If nobody joins in HOST_DURATION_MS, we give up and switch to hunting.
+      cycleTimeoutRef.current = setTimeout(() => {
+        // console.log("Host timed out, switching to Hunter");
+        startHunting();
+      }, HOST_DURATION_MS);
     });
 
     peer.on('connection', (conn) => {
-      // Someone found us!
+      // Success! Someone connected to us.
       setupConnection(conn);
     });
 
-    // B. If error 'unavailable-id', someone is already there. Connect to them (GUEST).
     peer.on('error', (err: any) => {
+      // If ID is taken ('unavailable-id'), it means someone else is hosting this slot.
+      // We should switch to hunting immediately to try and connect to them.
       if (err.type === 'unavailable-id') {
-        // Destroy the failed peer first
-        peer.destroy();
-        
-        // Create a new anonymous peer to connect as guest
-        const guestPeer = new Peer({
-          config: {
-            iceServers: [
-              { urls: 'stun:stun.l.google.com:19302' },
-              { urls: 'stun:global.stun.twilio.com:3478' }
-            ]
-          }
-        });
-        peerRef.current = guestPeer;
-
-        guestPeer.on('open', () => {
-          const conn = guestPeer.connect(myPeerId, { reliable: true });
-          
-          // If the connection hangs for 5s, retry
-          const timeout = setTimeout(() => {
-             if (status !== ChatMode.CONNECTED) {
-               guestPeer.destroy();
-               findStranger(); // Retry
-             }
-          }, 5000);
-          
-          conn.on('open', () => {
-            clearTimeout(timeout);
-            setupConnection(conn);
-          });
-          
-          conn.on('error', () => {
-             clearTimeout(timeout);
-             findStranger(); // Retry
-          });
-        });
+        startHunting();
       } else {
-        // Other errors (network), retry
-        setTimeout(findStranger, 2000);
+        // Other errors, just retry hosting different slot
+        cycleTimeoutRef.current = setTimeout(startHosting, 1000);
       }
     });
-
   }, [cleanup, setupConnection]);
+
+  // Phase 1: HUNTING (Client)
+  // We act as a client and try to connect to random slots.
+  const startHunting = useCallback(() => {
+    cleanup();
+    setStatus(ChatMode.SEARCHING); // "Searching for partner..."
+    isHostRef.current = false;
+
+    // Create an anonymous peer to be the hunter
+    const peer = new Peer({
+      debug: 0,
+      config: { iceServers: ICE_SERVERS }
+    });
+    peerRef.current = peer;
+
+    peer.on('open', () => {
+      // Try to connect to a random slot
+      const targetSlot = Math.floor(Math.random() * WAITING_SLOTS);
+      const targetPeerId = `${SLOT_PREFIX}${targetSlot}`;
+      
+      const conn = peer.connect(targetPeerId, { reliable: true });
+
+      // If connection opens, we are good!
+      conn.on('open', () => {
+        setupConnection(conn);
+      });
+
+      // If connection fails/closes immediately (nobody home), try next or switch to host
+      conn.on('close', () => {
+         // This might fire if we connect but they disconnect immediately
+      });
+      
+      conn.on('error', () => {
+        // Connection failed
+      });
+
+      // Set a timeout. If we don't connect within HUNT_TIMEOUT_MS, try another slot or switch to hosting.
+      // We'll flip a coin: 70% chance to keep hunting, 30% chance to start hosting.
+      // This prevents everyone from getting stuck in "Hunt" mode.
+      huntTimeoutRef.current = setTimeout(() => {
+        if (connRef.current && connRef.current.open) return; // Already connected
+        
+        // Destroy this attempt
+        conn.close();
+        
+        // Decision: Hunt again or Host?
+        if (Math.random() > 0.3) {
+           startHunting(); // Recursively hunt again
+        } else {
+           startHosting(); // Switch to hosting
+        }
+      }, HUNT_TIMEOUT_MS);
+    });
+
+    peer.on('error', () => {
+      // Peer creation failed, retry
+      cycleTimeoutRef.current = setTimeout(startHunting, 1000);
+    });
+
+  }, [cleanup, setupConnection, startHosting]); // Added startHosting to dep array via circular logic handling below
+
+  // Circular dependency fix: startHosting needs startHunting, and vice versa.
+  // We use a ref or simple function hoisting, but since they are in same scope, it's fine.
+  // However, for useEffect, we need a stable entry point.
+  
+  const connect = useCallback(() => {
+    // Start by hunting. It feels faster for the user.
+    startHunting();
+  }, [startHunting]);
 
   const disconnect = useCallback(() => {
     if (connRef.current && connRef.current.open) {
@@ -189,7 +246,7 @@ export const useHumanChat = (active: boolean) => {
     partnerTyping,
     sendMessage, 
     sendTyping,
-    connect: findStranger, 
+    connect, 
     disconnect 
   };
 };
